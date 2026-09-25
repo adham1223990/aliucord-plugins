@@ -1,6 +1,6 @@
 @file:Suppress("MISSING_DEPENDENCY_CLASS", "MISSING_DEPENDENCY_SUPERCLASS")
 
-import textreact.PluginSettings
+import textreactfix.PluginSettings
 import android.content.Context
 import android.os.Bundle
 import android.view.View
@@ -22,11 +22,11 @@ import com.discord.stores.StoreStream
 import com.discord.utilities.color.ColorCompat
 import com.discord.widgets.chat.list.actions.WidgetChatListActions
 import com.lytefast.flexinput.R
-import textreact.TextToEmoji
+import textreactfix.TextToEmoji
 import java.lang.reflect.InvocationTargetException
 
 @AliucordPlugin
-class TextReact : Plugin() {
+class TextReactFix : Plugin() {
     init {
         settingsTab = SettingsTab(PluginSettings::class.java, SettingsTab.Type.BOTTOM_SHEET)
             .withArgs(settings)
@@ -39,6 +39,38 @@ class TextReact : Plugin() {
         with(WidgetChatListActions::class.java) {
             val getBinding = getDeclaredMethod("getBinding").apply { isAccessible = true }
             val addReaction = getDeclaredMethod("addReaction", Emoji::class.java).apply { isAccessible = true }
+
+            /**
+             * بيبعت كل الرياكشنز في قايمة واحدة بأمان. القديم كان بيستخدم
+             * unicodeEmojiSurrogateMap[emoji]!! واللي لو الرمز مش موجود في خريطة
+             * إيموجي ديسكورد كان بيعمل NullPointerException ويوقف كل العملية من
+             * نص الطريق. دلوقتي أي رمز مش مدعوم بيتجاهل بس (وبيتسجل في اللوج)
+             * والباقي بيكمل عادي.
+             */
+            fun sendReactions(thisObject: Any, emojis: List<String>) {
+                Utils.threadPool.execute {
+                    var skipped = 0
+                    emojis.forEach { emoji ->
+                        val discordEmoji = StoreStream.getEmojis().unicodeEmojiSurrogateMap[emoji]
+                        if (discordEmoji != null) {
+                            try {
+                                addReaction.invoke(thisObject, discordEmoji)
+                            } catch (e: InvocationTargetException) {
+                                logger.error("TextReactFix: addReaction failed for '$emoji'", e)
+                            } catch (e: IllegalAccessException) {
+                                logger.error("TextReactFix: addReaction failed for '$emoji'", e)
+                            }
+                            Thread.sleep(1000)
+                        } else {
+                            skipped++
+                            logger.error("TextReactFix: '$emoji' isn't a Discord-recognized emoji, skipped", null)
+                        }
+                    }
+                    if (skipped > 0) {
+                        Utils.showToast("Skipped $skipped unsupported reaction(s).")
+                    }
+                }
+            }
 
             patcher.patch(
                 getDeclaredMethod("configureUI", WidgetChatListActions.Model::class.java),
@@ -70,16 +102,7 @@ class TextReact : Plugin() {
                                             .setDescription("Warning: The given input could not be 100% translated to reactions, do you still want to continue?")
                                         coDialog.setOnOkListener {
                                             coDialog.dismiss()
-                                            Utils.threadPool.execute {
-                                                result.first.forEach { emoji ->
-                                                    addReaction.invoke(
-                                                        callFrame.thisObject,
-                                                        StoreStream.getEmojis().unicodeEmojiSurrogateMap[emoji]!!
-                                                    )
-                                                    Thread.sleep(1000)
-                                                }
-                                            }
-
+                                            sendReactions(callFrame.thisObject, result.first)
                                         }
                                         coDialog.setOnCancelListener {
                                             coDialog.dismiss()
@@ -87,15 +110,7 @@ class TextReact : Plugin() {
                                         }
                                         coDialog.show(fragmentManager, "bbbbbb")
                                     } else {
-                                        Utils.threadPool.execute {
-                                            result.first.forEach { emoji ->
-                                                addReaction.invoke(
-                                                    callFrame.thisObject,
-                                                    StoreStream.getEmojis().unicodeEmojiSurrogateMap[emoji]!!
-                                                )
-                                                Thread.sleep(1000)
-                                            }
-                                        }
+                                        sendReactions(callFrame.thisObject, result.first)
                                     }
                                 }
                                 (callFrame.thisObject as WidgetChatListActions).dismiss()
